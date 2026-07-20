@@ -1,0 +1,1664 @@
+----------------------------------------------------------------------------------------------------------------------------------------
+      name:  master
+       log:  C:\Users\carolbraga\Downloads\stata_sample/output/logs/master_20 Jul 2026.txt
+  log type:  text
+ opened on:  20 Jul 2026, 09:54:44
+
+. 
+. di as result _newline ///
+>    "======================================================================" _newline ///
+>    " Brazil: Health Has No Price  |  Stata Replication" _newline ///
+>    " Started : `c(current_time)'  |  `c(current_date)'" _newline ///
+>    "======================================================================"
+
+======================================================================
+ Brazil: Health Has No Price  |  Stata Replication
+ Started : 09:54:44  |  20 Jul 2026
+======================================================================
+
+. 
+. * ---------------------------------------------------------------------------
+. * STEP 1 — DATA PREPARATION
+. *
+. *   01_build_panel.do   : import CSV; create hosp_rate and mortality_rate
+. *   02_strata_assign.do : assign analytical strata; build event-study dataset
+. * ---------------------------------------------------------------------------
+. di as result _newline " > STEP 1: Data Preparation"
+
+ > STEP 1: Data Preparation
+
+. do "$prep/01_build_panel.do"
+
+. * ===========================================================================
+. * prepare/01_build_panel.do  -  Load raw panel; create outcome variables
+. * ===========================================================================
+. * INPUT  : $data/brazil_health_panel.csv
+. *
+. * OUTPUT : $data/panel_clean.dta
+. *
+. * VARIABLES CREATED:
+. *   hosp_rate      — preventable hospitalizations per 10,000 residents
+. *   mortality_rate — preventable deaths per 10,000 residents
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [01_build_panel] Loading panel from CSV..."
+
+ [01_build_panel] Loading panel from CSV...
+
+. 
+. * ---------------------------------------------------------------------------
+. * 1. Import CSV
+. *    stringcols(2) keeps state_code as a string (e.g. "SP", "RJ", "BA")
+. * ---------------------------------------------------------------------------
+. import delimited using "$data/brazil_health_panel.csv", ///
+>     clear varnames(1) stringcols(2)
+(encoding automatically selected: ISO-8859-1)
+(9 vars, 50,376 obs)
+
+. 
+. di as text "  Rows imported : " _N
+  Rows imported : 50376
+
+. qui sum year
+
+. di as text "  Years         : " r(min) " to " r(max)
+  Years         : 2008 to 2016
+
+. 
+. * ---------------------------------------------------------------------------
+. * 1b. Force numeric types on any columns that have converted into strings
+. * ---------------------------------------------------------------------------
+. 
+. foreach v of varlist population total_hospitalizations total_deaths ///
+> avg_wage_nominal literacy_rate pct_black_parda {
+  2.         cap confirm string variable `v'
+  3.         if _rc == 0 {
+  4.                 destring `v', replace force
+  5.                 di as text " destring: `v' converted to numeric"
+  6.         }
+  7. }
+population: contains nonnumeric characters; replaced as long
+(23 missing values generated)
+ destring: population converted to numeric
+avg_wage_nominal: contains nonnumeric characters; replaced as double
+(13169 missing values generated)
+ destring: avg_wage_nominal converted to numeric
+literacy_rate: contains nonnumeric characters; replaced as double
+(300 missing values generated)
+ destring: literacy_rate converted to numeric
+
+. 
+. * ---------------------------------------------------------------------------
+. * 2. Declare as panel
+. * ---------------------------------------------------------------------------
+. xtset municipality_code year
+
+Panel variable: municipality_code (unbalanced)
+ Time variable: year, 2008 to 2016, but with gaps
+         Delta: 1 unit
+
+. 
+. * ---------------------------------------------------------------------------
+. * 3. Create outcome variables (rates per 10,000 residents)
+. * ---------------------------------------------------------------------------
+. * Population of 0 or missing would produce infinite or missing rates
+. replace population = . if population <= 0
+(0 real changes made)
+
+. 
+. gen double hosp_rate      = (total_hospitalizations / population) * 10000
+(23 missing values generated)
+
+. gen double mortality_rate = (total_deaths           / population) * 10000
+(23 missing values generated)
+
+. 
+. label var hosp_rate      "Preventable hospitalizations per 10,000"
+
+. label var mortality_rate "Preventable deaths per 10,000"
+
+. 
+. * ---------------------------------------------------------------------------
+. * 4. Sanity check
+. * ---------------------------------------------------------------------------
+. di as text _newline "  Outcome summary:"
+
+  Outcome summary:
+
+. tabstat hosp_rate mortality_rate, ///
+>     statistics(n mean sd p10 p50 p90) columns(statistics) format(%9.2f)
+
+    Variable |         N      Mean        SD       p10       p50       p90
+-------------+------------------------------------------------------------
+   hosp_rate |  50353.00    627.24    253.20    344.40    604.84    930.95
+mortality_~e |  50353.00     59.47     18.43     36.41     59.20     82.55
+--------------------------------------------------------------------------
+
+. 
+. * ---------------------------------------------------------------------------
+. * 5. Save as .dta - makes it faster for future use and analysis
+. * ---------------------------------------------------------------------------
+. compress
+  (0 bytes saved)
+
+. sort municipality_code year
+
+. save "$data/panel_clean.dta", replace
+file C:\Users\carolbraga\Downloads\stata_sample/data/panel_clean.dta saved
+
+. 
+. di as text _newline " [01_build_panel] Done. Saved: panel_clean.dta (" _N " obs)"
+
+ [01_build_panel] Done. Saved: panel_clean.dta (50376 obs)
+
+. 
+end of do-file
+
+. do "$prep/02_strata_assign.do"
+
+. * ===========================================================================
+. * prepare/02_strata_assign.do  -  Assign strata; build datasets
+. * ===========================================================================
+. * INPUT  : $data/panel_clean.dta
+. *
+. * OUTPUT : $data/panel_maps.dta       — full panel with strata labels
+. *                                        (all municipalities; used for
+. *                                         descriptive statistics and maps)
+. *          $data/panel_analysis.dta   — event-study panel restricted to
+. *                                        Target (LI-HD) vs. Reference (LI-LD)
+. *
+. * STRATA DEFINITION  (quartiles computed on 2010 cross-section):
+. *   Target (LI-HD)    — income Q1 & disease Q4  → primary treatment group
+. *   Reference (LI-LD) — income Q1 & disease Q1  → comparison group
+. *   Placebo (HI-HD)   — income Q4 & disease Q4  → high-income placebo
+. *   Placebo (HI-LD)   — income Q4 & disease Q1  → high-income placebo
+. *   Middle            — all remaining quartile combinations
+. *
+. * BASELINE COVARIATES created for the controlled specification:
+. *   base_wage_std, base_hosp_std, base_literacy_std, base_pct_black_std
+. *   Each is a standardized (mean 0, SD 1) value of the 2010 baseline
+. *   characteristic, interacted with year dummies in the regression to allow
+. *   municipalities to follow differential time trends.
+. *
+. * EVENT-STUDY VARIABLES created in panel_analysis.dta:
+. *   treated   — 1 for Target (LI-HD), 0 for Reference (LI-LD)
+. *   event_time — years relative to $treat_year, clamped to [-4, 3]
+. *   pre2–pre4  — Treated × 1(event_time == -k) for k = 2, 3, 4
+. *   post0–post3 — Treated × 1(event_time == k) for k = 0, 1, 2, 3
+. *   (Reference period is event_time == -1; no dummy created → omitted)
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [02_strata_assign] Assigning strata and building analysis dataset..."
+
+ [02_strata_assign] Assigning strata and building analysis dataset...
+
+. 
+. use "$data/panel_clean.dta", clear
+
+. 
+. * ===========================================================================
+. * PART A — BASELINE VALUES (2010 cross-section)
+. * ===========================================================================
+. 
+. * ---------------------------------------------------------------------------
+. * A1. Baseline wage
+. *     Prefer 2010; fall back to nearest pre-treatment year when 2010 is
+. *     missing (some municipalities had no formal-sector workers in 2010).
+. *         Probably due to some data instability with the servers. Ideal to have full
+. *         data, but this is the work around I was able to find.
+. * ---------------------------------------------------------------------------
+. preserve
+
+.     keep if year <= 2012 & !missing(avg_wage_nominal)
+(28,077 observations deleted)
+
+.     gen dist = abs(year - 2010)
+
+.     bysort municipality_code (dist year): keep if _n == 1   // nearest to 2010
+(16,734 observations deleted)
+
+.     rename avg_wage_nominal base_wage
+
+.     keep municipality_code base_wage
+
+.     tempfile base_wages
+
+.     save `base_wages'
+file C:\Users\LOD832~1\Temp\9\ST_23c4_000002.tmp saved as .dta format
+
+. restore
+
+. 
+. merge m:1 municipality_code using `base_wages', nogen
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                           291
+        from master                       291  
+        from using                          0  
+
+    Matched                            50,085  
+    -----------------------------------------
+
+. label var base_wage "Baseline avg nominal wage (R$, closest pre-treat year to 2010)"
+
+. 
+. * ---------------------------------------------------------------------------
+. * A2. 2010 baseline values for hospitalization rate, literacy, and race
+. * ---------------------------------------------------------------------------
+. preserve
+
+.     keep if year == 2010
+(44,784 observations deleted)
+
+.     rename hosp_rate     base_hosp
+
+.     rename literacy_rate base_literacy
+
+.     rename pct_black_parda base_pct_black
+
+.     keep municipality_code base_hosp base_literacy base_pct_black
+
+.     tempfile base_2010
+
+.     save `base_2010'
+file C:\Users\LOD832~1\Temp\9\ST_23c4_000004.tmp saved as .dta format
+
+. restore
+
+. 
+. merge m:1 municipality_code using `base_2010', nogen
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                            48
+        from master                        48  
+        from using                          0  
+
+    Matched                            50,328  
+    -----------------------------------------
+
+. 
+. * ===========================================================================
+. * PART B — QUARTILE ASSIGNMENT AND STRATA
+. * ===========================================================================
+. 
+. * ---------------------------------------------------------------------------
+. * B1. Compute income and disease quartile cutoffs on the 2010 cross-section
+. *     (restricted to municipalities with valid baseline wage and hosp rate)
+. * ---------------------------------------------------------------------------
+. preserve
+
+.     keep if year == 2010 & !missing(base_wage) & !missing(base_hosp)
+(44,811 observations deleted)
+
+.     xtile inc_q = base_wage, nq(4)
+
+.     xtile dis_q = base_hosp, nq(4)
+
+.     keep municipality_code inc_q dis_q
+
+.     tempfile quartiles
+
+.     save `quartiles'
+file C:\Users\LOD832~1\Temp\9\ST_23c4_000006.tmp saved as .dta format
+
+. restore
+
+. 
+. merge m:1 municipality_code using `quartiles', nogen
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                           291
+        from master                       291  
+        from using                          0  
+
+    Matched                            50,085  
+    -----------------------------------------
+
+. 
+. * ---------------------------------------------------------------------------
+. * B2. Assign strata labels
+. * ---------------------------------------------------------------------------
+. gen strata_main = "Middle"
+
+. replace strata_main = "Target (LI-HD)"    if inc_q == 1 & dis_q == 4
+variable strata_main was str6 now str14
+(2,808 real changes made)
+
+. replace strata_main = "Reference (LI-LD)" if inc_q == 1 & dis_q == 1
+variable strata_main was str14 now str17
+(3,996 real changes made)
+
+. replace strata_main = "Placebo (HI-HD)"   if inc_q == 4 & dis_q == 4
+(2,988 real changes made)
+
+. replace strata_main = "Placebo (HI-LD)"   if inc_q == 4 & dis_q == 1
+(2,394 real changes made)
+
+. replace strata_main = ""                  if missing(base_wage)
+(291 real changes made)
+
+. 
+. label var strata_main "Analytical strata (income x disease burden quartile)"
+
+. label var inc_q "Income quartile (1=lowest wage, 4=highest)"
+
+. label var dis_q "Disease quartile (1=lowest hosp rate, 4=highest)"
+
+. 
+. * Distribution check
+. di as text _newline "  Strata distribution (2010 cross-section):"
+
+  Strata distribution (2010 cross-section):
+
+. tab strata_main if year == 2010, missing
+
+Analytical strata |
+(income x disease |
+ burden quartile) |      Freq.     Percent        Cum.
+------------------+-----------------------------------
+                  |         27        0.48        0.48
+           Middle |      4,211       75.30       75.79
+  Placebo (HI-HD) |        332        5.94       81.72
+  Placebo (HI-LD) |        266        4.76       86.48
+Reference (LI-LD) |        444        7.94       94.42
+   Target (LI-HD) |        312        5.58      100.00
+------------------+-----------------------------------
+            Total |      5,592      100.00
+
+. 
+. * ===========================================================================
+. * PART C — STANDARDIZED BASELINE COVARIATES
+. * ===========================================================================
+. * Impute the small share of missing values with the 2010 median before
+. * standardizing (avoids dropping municipalities from the controlled model)
+. 
+. foreach v in base_literacy base_pct_black {
+  2.     qui sum `v' if year == 2010, detail
+  3.     replace `v' = r(p50) if missing(`v')
+  4. }
+(300 real changes made)
+(48 real changes made)
+
+. 
+. * Standardize using 2010 distribution (mean 0, SD 1)
+. foreach v in base_wage base_hosp base_literacy base_pct_black {
+  2.     qui sum `v' if year == 2010
+  3.     gen double `v'_std = (`v' - r(mean)) / r(sd)
+  4.     label var `v'_std "Standardized `v' (2010 distribution)"
+  5. }
+(291 missing values generated)
+(48 missing values generated)
+
+. 
+. rename base_literacy_std   base_literacy_std
+  (all newnames==oldnames)
+
+. rename base_pct_black_std  base_pct_black_std
+  (all newnames==oldnames)
+
+. 
+. * ===========================================================================
+. * PART D — SAVE FULL PANEL (for maps and summary statistics)
+. * ===========================================================================
+. compress
+  (0 bytes saved)
+
+. sort municipality_code year
+
+. save "$data/panel_maps.dta", replace
+file C:\Users\carolbraga\Downloads\stata_sample/data/panel_maps.dta saved
+
+. di as text "  Saved: panel_maps.dta (" _N " obs)"
+  Saved: panel_maps.dta (50376 obs)
+
+. 
+. * ===========================================================================
+. * PART E — BUILD EVENT-STUDY PANEL (Target + Reference only)
+. * ===========================================================================
+. 
+. * Restrict to the two analysis groups
+. keep if inlist(strata_main, "Target (LI-HD)", "Reference (LI-LD)")
+(43,572 observations deleted)
+
+. keep if !missing(base_wage) & !missing(base_hosp)
+(0 observations deleted)
+
+. 
+. * Treatment indicator
+. gen byte treated = (strata_main == "Target (LI-HD)")
+
+. label define lbl_treated 0 "Reference (LI-LD)" 1 "Target (LI-HD)"
+
+. label values treated lbl_treated
+
+. label var treated "= 1 if Target (LI-HD) municipality"
+
+. 
+. * Event time: years relative to treatment year, clamped to analysis window
+. gen int event_time = year - $treat_year
+
+. replace event_time = -$pre_window if event_time < -$pre_window
+(756 real changes made)
+
+. replace event_time = $post_window if event_time > $post_window
+(0 real changes made)
+
+. label var event_time "Years relative to treatment (t* = $treat_year)"
+
+. 
+. * ---------------------------------------------------------------------------
+. * Event-time interaction dummies
+. *   Reference period: event_time == -1  → omitted (no dummy created)
+. *   Pre-treatment  : event_time == -k for k = 2, 3, 4
+. *   Post-treatment : event_time == k  for k = 0, 1, 2, 3
+. * ---------------------------------------------------------------------------
+. forvalues t = 2/$pre_window {
+  2.     gen byte pre`t' = (event_time == -`t') * treated
+  3.     label var pre`t' "Treated x (k = -`t')"
+  4. }
+
+. forvalues t = 0/$post_window {
+  2.     gen byte post`t' = (event_time == `t') * treated
+  3.     label var post`t' "Treated x (k = `t')"
+  4. }
+
+. 
+. * Re-declare as panel after subsetting
+. xtset municipality_code year
+
+Panel variable: municipality_code (strongly balanced)
+ Time variable: year, 2008 to 2016
+         Delta: 1 unit
+
+. 
+. * Summary
+. qui levelsof municipality_code if treated == 1 & year == 2010
+
+. di as text _newline "  Treated municipalities  (Target)   : " `r(r)'
+
+  Treated municipalities  (Target)   : 312
+
+. qui levelsof municipality_code if treated == 0 & year == 2010
+
+. di as text "  Control municipalities (Reference): " `r(r)'
+  Control municipalities (Reference): 444
+
+. di as text "  Total observations in analysis panel: " _N
+  Total observations in analysis panel: 6804
+
+. 
+. compress
+  variable total_hospitalizations was long now int
+  variable total_deaths was long now int
+  variable event_time was int now byte
+  (34,020 bytes saved)
+
+. sort municipality_code year
+
+. save "$data/panel_analysis.dta", replace
+file C:\Users\carolbraga\Downloads\stata_sample/data/panel_analysis.dta saved
+
+. di as text _newline " [02_strata_assign] Done. Saved: panel_analysis.dta (" _N " obs)"
+
+ [02_strata_assign] Done. Saved: panel_analysis.dta (6804 obs)
+
+. 
+end of do-file
+
+. 
+. * ---------------------------------------------------------------------------
+. * STEP 2 — ANALYSIS OUTPUTS
+. *
+. *   sum_tab.do   : Table 1 — baseline summary statistics by strata
+. *   table_1.do   : Table 2 — event study regression coefficients (4 models)
+. *   fig_1.do     : Figures  — event study plots and income-quartile heterogeneity
+. *   table_2.do   : Table 3  — heterogeneity event study by income quartile
+. * ---------------------------------------------------------------------------
+. di as result _newline " > STEP 2: Analysis and Outputs"
+
+ > STEP 2: Analysis and Outputs
+
+. do "$anly/sum_tab.do"
+
+. * ===========================================================================
+. * analysis/sum_tab.do  -  Table 1: Baseline characteristics by strata
+. * ===========================================================================
+. * INPUT  : $data/panel_maps.dta
+. *
+. * OUTPUT : $tables/table1_baseline.tex
+. *          $tables/table1_baseline.csv
+. *
+. * Shows 2010 cross-sectional mean values for each analytical strata.
+. * The four main groups (Target, Reference, Placebo HI-HD, Placebo HI-LD)
+. * are shown first; the residual "Middle" group follows.
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [sum_tab] Building Table 1: Baseline Characteristics..."
+
+ [sum_tab] Building Table 1: Baseline Characteristics...
+
+. 
+. use "$data/panel_maps.dta", clear
+
+. 
+. * Restrict to 2010 baseline year
+. keep if year == 2010
+(44,784 observations deleted)
+
+. 
+. * ---------------------------------------------------------------------------
+. * 1. Compute group-level means (collapse to strata x variable cells)
+. * ---------------------------------------------------------------------------
+. * Convert proportion to percentage for display
+. replace pct_black_parda = pct_black_parda * 100
+(5,565 real changes made)
+
+. 
+. collapse ///
+>     (count) n_muni    = municipality_code   ///
+>     (mean)  hosp      = hosp_rate           ///
+>             wage      = avg_wage_nominal     ///
+>             pop       = population           ///
+>             pct_black = pct_black_parda      ///
+>             literacy  = literacy_rate        ///
+>     , by(strata_main)
+
+. 
+. * Remove unclassified row (municipalities with no baseline wage)
+. drop if missing(strata_main) | strata_main == ""
+(1 observation deleted)
+
+. 
+. * ---------------------------------------------------------------------------
+. * 2. Sort in preferred display order
+. * ---------------------------------------------------------------------------
+. gen byte sort_order = .
+(5 missing values generated)
+
+. replace sort_order = 1 if strata_main == "Target (LI-HD)"
+(1 real change made)
+
+. replace sort_order = 2 if strata_main == "Reference (LI-LD)"
+(1 real change made)
+
+. replace sort_order = 3 if strata_main == "Placebo (HI-HD)"
+(1 real change made)
+
+. replace sort_order = 4 if strata_main == "Placebo (HI-LD)"
+(1 real change made)
+
+. replace sort_order = 5 if strata_main == "Middle"
+(1 real change made)
+
+. sort sort_order
+
+. 
+. * ---------------------------------------------------------------------------
+. * 3. Display in Stata console
+. * ---------------------------------------------------------------------------
+. di as text _newline "  Table 1 — Baseline Characteristics (2010):"
+
+  Table 1 — Baseline Characteristics (2010):
+
+. list strata_main n_muni hosp wage pct_black literacy, ///
+>     sep(0) noobs abbreviate(20)
+
+  +----------------------------------------------------------------------------+
+  |       strata_main   n_muni        hosp        wage   pct_black    literacy |
+  |----------------------------------------------------------------------------|
+  |    Target (LI-HD)      312   1012.3814   682.47131    67.32785   80.546795 |
+  | Reference (LI-LD)      444   376.86568   685.58786    70.03697    79.40473 |
+  |   Placebo (HI-HD)      332     1014.36   1225.7337    33.12122   91.161747 |
+  |   Placebo (HI-LD)      266   395.16312   1402.0841    47.09731   91.189098 |
+  |            Middle     4211   658.46894    925.8907    50.21999   86.521021 |
+  +----------------------------------------------------------------------------+
+
+. 
+. * ---------------------------------------------------------------------------
+. * 4. Export to CSV
+. * ---------------------------------------------------------------------------
+. export delimited using "$tables/table1_baseline.csv", replace
+file C:\Users\carolbraga\Downloads\stata_sample/output/tables/table1_baseline.csv saved
+
+. di as text "  Saved: table1_baseline.csv"
+  Saved: table1_baseline.csv
+
+. 
+. * ---------------------------------------------------------------------------
+. * 5. Export to LaTeX (hand-written for clean formatting)
+. * ---------------------------------------------------------------------------
+. file open fh using "$tables/table1_baseline.tex", write replace
+
+. 
+. file write fh "\begin{table}[H]" _newline
+
+. file write fh "\caption{\textbf{Baseline Characteristics (2010) by Strata}}" _newline
+
+. file write fh "\label{tab:baseline}" _newline
+
+. file write fh "\centering" _newline
+
+. file write fh "\resizebox{\textwidth}{!}{%" _newline
+
+. file write fh "\begin{tabular}{lrrrrr}" _newline
+
+. file write fh "    \toprule" _newline
+
+. file write fh "    \textbf{Strata} & \textbf{N munic.} & \textbf{Hosp.\ Rate} & \textbf{Avg.\ Wage} & \textbf{\% Black/Mixed} & \textb
+> f{Literacy (\%)} \\" _newline
+
+. file write fh "    & & \textit{(per 10k)} & \textit{(R\$)} & & \\" _newline
+
+. file write fh "    \midrule" _newline
+
+. 
+. * Write one row per stratum
+. forvalues i = 1/`=_N' {
+  2.     local sname : di strata_main[`i']
+  3.     local n     : di %6.0f    n_muni[`i']
+  4.     local h     : di %9.1f    hosp[`i']
+  5.     local w     : di %9.1f    wage[`i']
+  6.     local b     : di %5.1f    pct_black[`i']
+  7.     local l     : di %5.1f    literacy[`i']
+  8.     file write fh "    `sname' & `n' & `h' & `w' & `b' & `l' \\" _newline
+  9. }
+
+. 
+. file write fh "    \bottomrule" _newline
+
+. file write fh "\end{tabular}}" _newline
+
+. file write fh "\begin{tablenotes}" _newline
+
+. file write fh "\small" _newline
+
+. file write fh "\item \textit{Notes:} Mean values in 2010. Hosp.\ Rate = preventable hospitalizations per 10,000 residents. Avg.\ Wage 
+> = average nominal monthly wage (R\$). Primary event study sample uses Target and Reference only (754 municipalities, 6{,}786 observati
+> ons)." _newline
+
+. file write fh "\end{tablenotes}" _newline
+
+. file write fh "\end{table}" _newline
+
+. 
+. file close fh
+
+. di as text "  Saved: table1_baseline.tex"
+  Saved: table1_baseline.tex
+
+. di as text " [sum_tab] Done."
+ [sum_tab] Done.
+
+. 
+end of do-file
+
+. do "$anly/table_1.do"    // stores estimates in memory — must run before fig_1.do
+
+. * ===========================================================================
+. * analysis/table_1.do  -  Table 2: Event study regression coefficients
+. * ===========================================================================
+. * INPUT  : $data/panel_analysis.dta
+. *
+. * OUTPUT : $tables/table2_event_study.tex  (LaTeX via esttab)
+. *
+. * MODELS:
+. *   (1) Hosp. Rate   — Basic     (municipality + year FE)
+. *   (2) Hosp. Rate   — Controlled (+ baseline x year interaction trends)
+. *   (3) Mortality Rate — Basic
+. *   (4) Mortality Rate — Controlled
+. *
+. * All models: municipality FE, year FE, SE clustered by municipality.
+. * Reference period: k = -1 (year 2012) — omitted by construction.
+. * "Controlled" adds: standardized baseline wage, hospitalization rate,
+. *  literacy, and race share, each interacted with year dummies.  This
+. *  allows municipalities to follow characteristic-specific time trends,
+. *  partially addressing the parallel-trends concern visible in pre-trends.
+. *
+. * Stored estimates (for fig_1.do): m_hosp_basic, m_hosp_ctrl,
+. *                                   m_mort_basic, m_mort_ctrl
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [table_1] Running event study regressions (4 models)..."
+
+ [table_1] Running event study regressions (4 models)...
+
+. 
+. use "$data/panel_analysis.dta", clear
+
+. 
+. * Locals for regressor lists (keeps regression commands concise)
+. local evars  pre4 pre3 pre2 post0 post1 post2 post3
+
+. local trends c.base_wage_std#i.year      ///
+>              c.base_hosp_std#i.year      ///
+>              c.base_literacy_std#i.year  ///
+>              c.base_pct_black_std#i.year
+
+. 
+. * ===========================================================================
+. * MODEL 1: Hospitalization rate — Basic specification
+. * ===========================================================================
+. reghdfe hosp_rate `evars' , ///
+>     absorb(municipality_code year) ///
+>     cluster(municipality_code) ///
+>     nocons
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      6,804
+Absorbing 2 HDFE groups                           F(   7,    755) =      48.99
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.8634
+                                                  Adj R-squared   =     0.8460
+                                                  Within R-sq.    =     0.0900
+Number of clusters (municipality_code) =        756Root MSE       =   126.6811
+
+                    (Std. err. adjusted for 756 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+   hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |   -15.8291   13.87405    -1.14   0.254     -43.0654    11.40721
+        pre3 |   122.3885   11.91496    10.27   0.000     98.99806    145.7789
+        pre2 |   59.22504   9.390965     6.31   0.000     40.78954    77.66055
+       post0 |  -29.86271    10.1719    -2.94   0.003    -49.83128   -9.894133
+       post1 |  -56.85755   11.40655    -4.98   0.000    -79.24987   -34.46522
+       post2 |  -99.66339   15.46852    -6.44   0.000    -130.0298   -69.29696
+       post3 |  -152.2669   16.50712    -9.22   0.000    -184.6722   -119.8615
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       756         756           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+
+. 
+. estimates store m_hosp_basic
+
+. di as text "  (1) Hosp. Rate   — Basic     : N=" e(N) "  Within R2=" %6.4f e(r2_within)
+  (1) Hosp. Rate   — Basic     : N=6804  Within R2=0.0900
+
+. 
+. * ===========================================================================
+. * MODEL 2: Hospitalization rate — Controlled specification
+. * ===========================================================================
+. * The baseline-x-year terms are nuisance controls; they absorb municipality-
+. * specific linear (and nonlinear, via the full year-FE interaction) trends
+. * driven by pre-policy observable differences.
+. 
+. reghdfe hosp_rate `evars' `trends' , ///
+>     absorb(municipality_code year) ///
+>     cluster(municipality_code) ///
+>     nocons
+(MWFE estimator converged in 2 iterations)
+note: 2016.year#c.base_wage_std omitted because of collinearity
+note: 2016.year#c.base_hosp_std omitted because of collinearity
+note: 2016.year#c.base_literacy_std omitted because of collinearity
+note: 2016.year#c.base_pct_black_std omitted because of collinearity
+
+HDFE Linear regression                            Number of obs   =      6,804
+Absorbing 2 HDFE groups                           F(  39,    755) =      15.52
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.8704
+                                                  Adj R-squared   =     0.8531
+                                                  Within R-sq.    =     0.1363
+Number of clusters (municipality_code) =        756Root MSE       =   123.7473
+
+                                 (Std. err. adjusted for 756 clusters in municipality_code)
+-------------------------------------------------------------------------------------------
+                          |               Robust
+                hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+--------------------------+----------------------------------------------------------------
+                     pre4 |   86.28527   34.51541     2.50   0.013     18.52769    154.0429
+                     pre3 |   62.31849   38.56301     1.62   0.107    -13.38497     138.022
+                     pre2 |   13.06438   28.06854     0.47   0.642    -42.03728    68.16603
+                    post0 |   15.48476   26.86447     0.58   0.565    -37.25318    68.22271
+                    post1 |   31.88772   27.74169     1.15   0.251    -22.57231    86.34774
+                    post2 |    80.8213   56.89901     1.42   0.156    -30.87777    192.5204
+                    post3 |    51.4106   60.57952     0.85   0.396    -67.51372    170.3349
+                          |
+     year#c.base_wage_std |
+                    2008  |  -78.93875   33.13142    -2.38   0.017    -143.9794    -13.8981
+                    2009  |   -75.6636   30.94886    -2.44   0.015    -136.4196   -14.90754
+                    2010  |  -53.96229   29.67038    -1.82   0.069    -112.2085    4.283964
+                    2011  |  -25.69035   28.10264    -0.91   0.361    -80.85896    29.47825
+                    2012  |   -27.6033   25.73777    -1.07   0.284     -78.1294    22.92281
+                    2013  |     12.125   23.06467     0.53   0.599    -33.15351     57.4035
+                    2014  |  -2.112612   21.72545    -0.10   0.923    -44.76208    40.53685
+                    2015  |   11.22053   19.45136     0.58   0.564    -26.96464     49.4057
+                    2016  |          0  (omitted)
+                          |
+     year#c.base_hosp_std |
+                    2008  |    34.7114   30.42287     1.14   0.254    -25.01207    94.43487
+                    2009  |   46.50387   28.78013     1.62   0.107    -9.994717    103.0025
+                    2010  |   108.5149   29.04854     3.74   0.000     51.48943    165.5404
+                    2011  |   102.9308   28.32793     3.63   0.000     47.31996    158.5417
+                    2012  |    83.0755   27.05884     3.07   0.002     29.95599     136.195
+                    2013  |   65.17662   26.70104     2.44   0.015     12.75951    117.5937
+                    2014  |   47.13206    23.8617     1.98   0.049     .2888994    93.97522
+                    2015  |   10.96232   12.36449     0.89   0.376    -13.31054    35.23518
+                    2016  |          0  (omitted)
+                          |
+ year#c.base_literacy_std |
+                    2008  |   32.83505   12.00203     2.74   0.006     9.273733    56.39638
+                    2009  |   28.47511   11.08569     2.57   0.010     6.712665    50.23755
+                    2010  |   12.92397   10.32424     1.25   0.211    -7.343652     33.1916
+                    2011  |   11.53991   9.718925     1.19   0.235    -7.539423    30.61923
+                    2012  |   22.68899   9.273672     2.45   0.015      4.48374    40.89424
+                    2013  |   6.312908   7.931101     0.80   0.426    -9.256724    21.88254
+                    2014  |   14.79379   7.452275     1.99   0.047     .1641491    29.42343
+                    2015  |  -4.545652   6.007792    -0.76   0.450    -16.33961     7.24831
+                    2016  |          0  (omitted)
+                          |
+year#c.base_pct_black_std |
+                    2008  |    25.1638   13.81004     1.82   0.069     -1.94684    52.27445
+                    2009  |    20.5107   15.30425     1.34   0.181    -9.533251    50.55464
+                    2010  |   20.61474   13.13919     1.57   0.117    -5.178939    46.40843
+                    2011  |   18.72164   13.17577     1.42   0.156    -7.143866    44.58714
+                    2012  |   15.56633   11.56357     1.35   0.179    -7.134236     38.2669
+                    2013  |   6.216159   10.46051     0.59   0.553    -14.31899    26.75131
+                    2014  |   15.32406   8.661067     1.77   0.077    -1.678578     32.3267
+                    2015  |   22.92456   6.551258     3.50   0.000     10.06372    35.78541
+                    2016  |          0  (omitted)
+-------------------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       756         756           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+
+. 
+. estimates store m_hosp_ctrl
+
+. di as text "  (2) Hosp. Rate   — Controlled: N=" e(N) "  Within R2=" %6.4f e(r2_within)
+  (2) Hosp. Rate   — Controlled: N=6804  Within R2=0.1363
+
+. 
+. * ===========================================================================
+. * MODEL 3: Mortality rate — Basic specification
+. * ===========================================================================
+. reghdfe mortality_rate `evars' , ///
+>     absorb(municipality_code year) ///
+>     cluster(municipality_code) ///
+>     nocons
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      6,804
+Absorbing 2 HDFE groups                           F(   7,    755) =       1.07
+Statistics robust to heteroskedasticity           Prob > F        =     0.3787
+                                                  R-squared       =     0.7015
+                                                  Adj R-squared   =     0.6634
+                                                  Within R-sq.    =     0.0013
+Number of clusters (municipality_code) =        756Root MSE       =    10.0566
+
+                    (Std. err. adjusted for 756 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+mortality_~e | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |  -1.458389   .9054366    -1.61   0.108    -3.235862    .3190837
+        pre3 |  -.5571836    .940484    -0.59   0.554    -2.403458    1.289091
+        pre2 |  -.7614713   .9114551    -0.84   0.404    -2.550759    1.027816
+       post0 |  -.8571393   .9616219    -0.89   0.373     -2.74491    1.030631
+       post1 |  -2.101814   1.027206    -2.05   0.041    -4.118334   -.0852936
+       post2 |  -2.271526    1.01659    -2.23   0.026    -4.267205   -.2758474
+       post3 |  -1.188376   1.031939    -1.15   0.250    -3.214187    .8374339
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       756         756           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+
+. 
+. estimates store m_mort_basic
+
+. di as text "  (3) Mort. Rate   — Basic     : N=" e(N) "  Within R2=" %6.4f e(r2_within)
+  (3) Mort. Rate   — Basic     : N=6804  Within R2=0.0013
+
+. 
+. * ===========================================================================
+. * MODEL 4: Mortality rate — Controlled specification
+. * ===========================================================================
+. reghdfe mortality_rate `evars' `trends' , ///
+>     absorb(municipality_code year) ///
+>     cluster(municipality_code) ///
+>     nocons
+(MWFE estimator converged in 2 iterations)
+note: 2016.year#c.base_wage_std omitted because of collinearity
+note: 2016.year#c.base_hosp_std omitted because of collinearity
+note: 2016.year#c.base_literacy_std omitted because of collinearity
+note: 2016.year#c.base_pct_black_std omitted because of collinearity
+
+HDFE Linear regression                            Number of obs   =      6,804
+Absorbing 2 HDFE groups                           F(  39,    755) =       1.91
+Statistics robust to heteroskedasticity           Prob > F        =     0.0008
+                                                  R-squared       =     0.7047
+                                                  Adj R-squared   =     0.6652
+                                                  Within R-sq.    =     0.0119
+Number of clusters (municipality_code) =        756Root MSE       =    10.0295
+
+                                 (Std. err. adjusted for 756 clusters in municipality_code)
+-------------------------------------------------------------------------------------------
+                          |               Robust
+           mortality_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+--------------------------+----------------------------------------------------------------
+                     pre4 |   1.588012   2.027579     0.78   0.434    -2.392351    5.568375
+                     pre3 |   .1580642   1.864145     0.08   0.932    -3.501459    3.817587
+                     pre2 |  -.0577473   1.870974    -0.03   0.975    -3.730676    3.615182
+                    post0 |  -.1110655   1.978634    -0.06   0.955    -3.995344    3.773213
+                    post1 |   1.707436   2.181249     0.78   0.434    -2.574599    5.989471
+                    post2 |  -1.321059   2.043768    -0.65   0.518    -5.333204    2.691085
+                    post3 |   -.449153   2.232437    -0.20   0.841    -4.831674    3.933368
+                          |
+     year#c.base_wage_std |
+                    2008  |  -1.649793   2.075669    -0.79   0.427    -5.724561    2.424975
+                    2009  |    .193295   2.121321     0.09   0.927    -3.971094    4.357684
+                    2010  |  -4.420027   1.925921    -2.30   0.022    -8.200824   -.6392299
+                    2011  |    1.16787   1.976431     0.59   0.555    -2.712084    5.047823
+                    2012  |  -2.301461    1.88295    -1.22   0.222    -5.997901     1.39498
+                    2013  |  -.9115087   2.016127    -0.45   0.651    -4.869389    3.046371
+                    2014  |  -.7182402   1.790229    -0.40   0.688    -4.232659    2.796179
+                    2015  |   .9982542   1.895868     0.53   0.599    -2.723546    4.720054
+                    2016  |          0  (omitted)
+                          |
+     year#c.base_hosp_std |
+                    2008  |  -.9088815   1.010273    -0.90   0.369    -2.892159    1.074396
+                    2009  |  -.9995489   1.034325    -0.97   0.334    -3.030044    1.030946
+                    2010  |  -.0868524   .8500811    -0.10   0.919    -1.755656    1.581951
+                    2011  |  -.0079771   .9561814    -0.01   0.993    -1.885067    1.869113
+                    2012  |   .1867355   .7974821     0.23   0.815     -1.37881    1.752281
+                    2013  |   .0595489   .8902659     0.07   0.947    -1.688142     1.80724
+                    2014  |    -1.2467   .8890691    -1.40   0.161    -2.992041    .4986413
+                    2015  |   .0084197   .8146804     0.01   0.992    -1.590888    1.607728
+                    2016  |          0  (omitted)
+                          |
+ year#c.base_literacy_std |
+                    2008  |   1.620601   .7640569     2.12   0.034     .1206726     3.12053
+                    2009  |   1.469988   .7757802     1.89   0.058    -.0529545    2.992931
+                    2010  |   2.573689   .7336404     3.51   0.000     1.133471    4.013907
+                    2011  |   1.743869   .7460537     2.34   0.020     .2792831    3.208456
+                    2012  |    2.03939   .6825981     2.99   0.003     .6993742    3.379406
+                    2013  |   .0080159   .7355348     0.01   0.991    -1.435921    1.451952
+                    2014  |   .5772984   .6440089     0.90   0.370    -.6869626    1.841559
+                    2015  |  -.5156535   .7056868    -0.73   0.465    -1.900995     .869688
+                    2016  |          0  (omitted)
+                          |
+year#c.base_pct_black_std |
+                    2008  |    2.42996   1.007223     2.41   0.016     .4526687    4.407251
+                    2009  |   1.630218   1.045632     1.56   0.119    -.4224733     3.68291
+                    2010  |   1.812464   .9765648     1.86   0.064    -.1046415    3.729569
+                    2011  |   1.680391   1.054648     1.59   0.112    -.3899999    3.750782
+                    2012  |   .4228874   .9327707     0.45   0.650    -1.408245     2.25402
+                    2013  |   1.446887   .9686702     1.49   0.136    -.4547204    3.348494
+                    2014  |   1.219616   .9458616     1.29   0.198    -.6372156    3.076447
+                    2015  |   1.250981   .9030649     1.39   0.166    -.5218356    3.023798
+                    2016  |          0  (omitted)
+-------------------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       756         756           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+
+. 
+. estimates store m_mort_ctrl
+
+. di as text "  (4) Mort. Rate   — Controlled: N=" e(N) "  Within R2=" %6.4f e(r2_within)
+  (4) Mort. Rate   — Controlled: N=6804  Within R2=0.0119
+
+. 
+. * ===========================================================================
+. * EXPORT: LaTeX regression table
+. * ===========================================================================
+. esttab m_hosp_basic m_hosp_ctrl m_mort_basic m_mort_ctrl          ///
+>     using "$tables/table2_event_study.tex", replace                ///
+>     booktabs                                                       ///
+>     keep(`evars')                                                  ///
+>     order(`evars')                                                 ///
+>     coeflabels(                                                    ///
+>         pre4  "Treated \$\times\$ \$k = -4\$"                     ///
+>         pre3  "Treated \$\times\$ \$k = -3\$"                     ///
+>         pre2  "Treated \$\times\$ \$k = -2\$"                     ///
+>         post0 "Treated \$\times\$ \$k = 0\$"                      ///
+>         post1 "Treated \$\times\$ \$k = 1\$"                      ///
+>         post2 "Treated \$\times\$ \$k = 2\$"                      ///
+>         post3 "Treated \$\times\$ \$k = 3\$")                     ///
+>     mtitles("Hosp. Basic" "Hosp. Controlled" "Mort. Basic" "Mort. Controlled") ///
+>     mgroups("Hospitalization Rate (per 10,000)" "Mortality Rate (per 10,000)", ///
+>             pattern(1 0 1 0)                                       ///
+>             prefix(\multicolumn{@span}{c}{) suffix(})              ///
+>             span erepeat(\cmidrule(lr){@span}))                    ///
+>     stats(N r2 r2_within N_clust,                                  ///
+>           fmt(0 3 3 0)                                             ///
+>           labels("Observations" "R\$^2\$" "Within R\$^2\$" "Municipalities")) ///
+>     star(* 0.1 ** 0.05 *** 0.01)                                   ///
+>     se                                                             ///
+>     note("Municipality and year fixed effects in all models."      ///
+>          "Standard errors clustered at the municipality level in parentheses." ///
+>          "Reference period: \$k = -1\$ (year 2012)."              ///
+>          "313 treated (Target LI-HD) and 441 control (Reference LI-LD) municipalities." ///
+>          "Controlled models add standardized 2010 baseline wage, hospitalization rate," ///
+>          "literacy rate, and race share each interacted with year dummies.")  ///
+>     label
+(file C:\Users\carolbraga\Downloads\stata_sample/output/tables/table2_event_study.tex not found)
+(output written to C:\Users\carolbraga\Downloads\stata_sample/output/tables/table2_event_study.tex)
+
+. 
+. di as text "  Saved: table2_event_study.tex"
+  Saved: table2_event_study.tex
+
+. 
+. * ===========================================================================
+. * Quick console preview of results
+. * ===========================================================================
+. di as text _newline "  --- Console Preview ---"
+
+  --- Console Preview ---
+
+. esttab m_hosp_basic m_hosp_ctrl m_mort_basic m_mort_ctrl,          ///
+>     keep(`evars') order(`evars')                                   ///
+>     star(* 0.1 ** 0.05 *** 0.01) se                               ///
+>     stats(N r2_within, fmt(0 3) labels("N" "Within R2"))          ///
+>     mtitles("Hosp Basic" "Hosp Ctrl" "Mort Basic" "Mort Ctrl")
+
+----------------------------------------------------------------------------
+                      (1)             (2)             (3)             (4)   
+               Hosp Basic       Hosp Ctrl      Mort Basic       Mort Ctrl   
+----------------------------------------------------------------------------
+pre4               -15.83           86.29**        -1.458           1.588   
+                  (13.87)         (34.52)         (0.905)         (2.028)   
+
+pre3                122.4***        62.32          -0.557           0.158   
+                  (11.91)         (38.56)         (0.940)         (1.864)   
+
+pre2                59.23***        13.06          -0.761         -0.0577   
+                  (9.391)         (28.07)         (0.911)         (1.871)   
+
+post0              -29.86***        15.48          -0.857          -0.111   
+                  (10.17)         (26.86)         (0.962)         (1.979)   
+
+post1              -56.86***        31.89          -2.102**         1.707   
+                  (11.41)         (27.74)         (1.027)         (2.181)   
+
+post2              -99.66***        80.82          -2.272**        -1.321   
+                  (15.47)         (56.90)         (1.017)         (2.044)   
+
+post3              -152.3***        51.41          -1.188          -0.449   
+                  (16.51)         (60.58)         (1.032)         (2.232)   
+----------------------------------------------------------------------------
+N                    6804            6804            6804            6804   
+Within R2           0.090           0.136           0.001           0.012   
+----------------------------------------------------------------------------
+Standard errors in parentheses
+* p<0.1, ** p<0.05, *** p<0.01
+
+. 
+. di as text _newline " [table_1] Done."
+
+ [table_1] Done.
+
+. 
+end of do-file
+
+. do "$anly/fig_1.do"
+
+. * ===========================================================================
+. * analysis/fig_1.do  -  Event study figures
+. * ===========================================================================
+. * INPUT  : Stored estimates from table_1.do (must run in the same session)
+. *          $data/panel_maps.dta  (for income-quartile heterogeneity figure)
+. *
+. * OUTPUT : $graphs/fig1a_hosp_event_study.png
+. *          $graphs/fig1b_mort_event_study.png
+. *          $graphs/fig1c_income_quartile_heterogeneity.png
+. *
+. * FIGURE STRUCTURE:
+. *   Fig 1a — Hospitalization rate: Basic vs. Controlled on same plot
+. *   Fig 1b — Mortality rate:       Basic vs. Controlled on same plot
+. *   Fig 1c — Hospitalization rate: HD vs. LD disease burden within each
+. *             income quartile (Q1 lowest to Q4 highest), basic spec only
+. *
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [fig_1] Drawing event study figures..."
+
+ [fig_1] Drawing event study figures...
+
+. 
+. * ---------------------------------------------------------------------------
+. * 0. Verify that required stored estimates are available
+. * ---------------------------------------------------------------------------
+. foreach m in m_hosp_basic m_hosp_ctrl m_mort_basic m_mort_ctrl {
+  2.     cap estimates restore `m'
+  3.     if _rc != 0 {
+  4.         di as error "  ERROR: estimate '`m'' not found. Run table_1.do first."
+  5.         exit 198
+  6.     }
+  7. }
+
+. 
+. * Variable order for all event-study plots (chronological)
+. local evars   pre4 pre3 pre2 post0 post1 post2 post3
+
+. 
+. * Coefficient labels for coefplot
+. local xlabels pre4="-4" pre3="-3" pre2="-2" post0="0" post1="1" post2="2" post3="3"
+
+. 
+. * Shared graphic options (applied to all three figures)
+. local gr_opts                                                           ///
+>     vertical                                                            ///
+>     yline(0, lpattern(dash) lcolor(gs10) lwidth(thin))                 ///
+>     xline(3.5, lpattern(dot) lcolor(gs10) lwidth(thin))                ///
+>     xtitle("Years relative to treatment" "(reference: k = -1, year 2012)", size(small)) ///
+>     ytitle("Coefficient estimate", size(small))                         ///
+>     legend(rows(1) position(6) size(vsmall) symxsize(2.5))             ///
+>     graphregion(color(white)) bgcolor(white)                            ///
+>     ysize(4) xsize(9)
+
+. 
+. * ===========================================================================
+. * FIGURE 1a — Hospitalization Rate: Basic vs. Controlled
+. * ===========================================================================
+. coefplot                                                                ///
+>     (m_hosp_basic,                                                      ///
+>         label("Basic")                                                  ///
+>         msymbol(circle) mcolor(navy) msize(medsmall)                    ///
+>         ciopts(recast(rcap) lcolor(navy) lwidth(medthick)))             ///
+>     (m_hosp_ctrl,                                                       ///
+>         label("With baseline {&times} year controls")                   ///
+>         msymbol(triangle) mcolor(cranberry) msize(medsmall)             ///
+>         ciopts(recast(rcap) lcolor(cranberry) lwidth(medthick)))        ///
+>     ,                                                                   ///
+>     keep(`evars') order(`evars') coeflabels(`xlabels')                  ///
+>     title("Event Study: Hospitalization Rate (per 10,000)", size(medsmall)) ///
+>     subtitle("Target (LI-HD) vs. Reference (LI-LD)  |  Municipality + Year FE  |  95% CI", ///
+>              size(vsmall))                                              ///
+>     `gr_opts'
+
+. 
+. graph export "$graphs/fig1a_hosp_event_study.png", replace width(2400)
+(file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1a_hosp_event_study.png not found)
+file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1a_hosp_event_study.png saved as PNG format
+
+. di as text "  Saved: fig1a_hosp_event_study.png"
+  Saved: fig1a_hosp_event_study.png
+
+. 
+. * ===========================================================================
+. * FIGURE 1b — Mortality Rate: Basic vs. Controlled
+. * ===========================================================================
+. coefplot                                                                ///
+>     (m_mort_basic,                                                      ///
+>         label("Basic")                                                  ///
+>         msymbol(circle) mcolor(navy) msize(medsmall)                    ///
+>         ciopts(recast(rcap) lcolor(navy) lwidth(medthick)))             ///
+>     (m_mort_ctrl,                                                       ///
+>         label("With baseline {&times} year controls")                   ///
+>         msymbol(triangle) mcolor(cranberry) msize(medsmall)             ///
+>         ciopts(recast(rcap) lcolor(cranberry) lwidth(medthick)))        ///
+>     ,                                                                   ///
+>     keep(`evars') order(`evars') coeflabels(`xlabels')                  ///
+>     title("Event Study: Mortality Rate (per 10,000)", size(medsmall))   ///
+>     subtitle("Target (LI-HD) vs. Reference (LI-LD)  |  Municipality + Year FE  |  95% CI", ///
+>              size(vsmall))                                              ///
+>     `gr_opts'
+
+. 
+. graph export "$graphs/fig1b_mort_event_study.png", replace width(2400)
+(file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1b_mort_event_study.png not found)
+file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1b_mort_event_study.png saved as PNG format
+
+. di as text "  Saved: fig1b_mort_event_study.png"
+  Saved: fig1b_mort_event_study.png
+
+. 
+. * ===========================================================================
+. * FIGURE 1c — Heterogeneity: HD vs. LD within each income quartile
+. * ===========================================================================
+. di as text _newline "  Running income-quartile heterogeneity models for figure..."
+
+  Running income-quartile heterogeneity models for figure...
+
+. 
+. use "$data/panel_maps.dta", clear
+
+. 
+. * Keep municipalities at the extremes of the disease distribution (Q1 and Q4)
+. * within each income quartile, so we can estimate Q4-vs-Q1 disease effect
+. keep if inlist(dis_q, 1, 4) & !missing(inc_q)
+(25,329 observations deleted)
+
+. 
+. * Treatment = high disease burden (Q4) within each income group
+. gen byte treated_het = (dis_q == 4)
+
+. label var treated_het "= 1 if Q4 disease burden (high disease), within income quartile"
+
+. 
+. * Event time
+. gen int event_time = year - $treat_year
+
+. replace event_time = -$pre_window if event_time < -$pre_window
+(2,783 real changes made)
+
+. replace event_time = $post_window if event_time > $post_window
+(0 real changes made)
+
+. 
+. * Interaction dummies (same structure as main analysis)
+. forvalues t = 2/$pre_window {
+  2.     gen byte pre`t' = (event_time == -`t') * treated_het
+  3. }
+
+. forvalues t = 0/$post_window {
+  2.     gen byte post`t' = (event_time == `t') * treated_het
+  3. }
+
+. 
+. xtset municipality_code year
+
+Panel variable: municipality_code (strongly balanced)
+ Time variable: year, 2008 to 2016
+         Delta: 1 unit
+
+. 
+. * Run basic event study within each income quartile (Q1 to Q4)
+. local qlabels `""Q1 Income (Lowest)" "Q2 Income" "Q3 Income" "Q4 Income (Highest)""'
+
+. local q = 0
+
+. foreach lbl of local qlabels {
+  2.     local ++q
+  3.     qui reghdfe hosp_rate `evars' if inc_q == `q', ///
+>         absorb(municipality_code year) cluster(municipality_code) nocons
+  4.     estimates store het_q`q'
+  5.     di as text "    Q`q' done: N=" e(N) "  Within R2=" %5.3f e(r2_within)
+  6. }
+    Q1 done: N=6804  Within R2=0.090
+    Q2 done: N=6786  Within R2=0.067
+    Q3 done: N=6075  Within R2=0.036
+    Q4 done: N=5382  Within R2=0.057
+
+. 
+. * Plot all four income quartiles on one graph
+. coefplot                                                                ///
+>     (het_q1, label("Q1 Income (Lowest)")                               ///
+>         msymbol(circle)   mcolor(navy)    ciopts(recast(rcap) lcolor(navy)))    ///
+>     (het_q2, label("Q2 Income")                                        ///
+>         msymbol(square)   mcolor(teal)    ciopts(recast(rcap) lcolor(teal)))    ///
+>     (het_q3, label("Q3 Income")                                        ///
+>         msymbol(diamond)  mcolor(orange)  ciopts(recast(rcap) lcolor(orange)))  ///
+>     (het_q4, label("Q4 Income (Highest)")                              ///
+>         msymbol(triangle) mcolor(maroon)  ciopts(recast(rcap) lcolor(maroon)))  ///
+>     ,                                                                   ///
+>     keep(`evars') order(`evars') coeflabels(`xlabels')                  ///
+>     title("Hosp. Rate: High vs. Low Disease Burden by Income Quartile", ///
+>           size(medsmall))                                               ///
+>     subtitle("Each series compares Q4 disease vs. Q1 disease within the same income quartile  |  95% CI", ///
+>              size(vsmall))                                              ///
+>     `gr_opts'
+
+. 
+. graph export "$graphs/fig1c_income_quartile_heterogeneity.png", replace width(2400)
+(file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1c_income_quartile_heterogeneity.png not found)
+file C:\Users\carolbraga\Downloads\stata_sample/output/graphs/fig1c_income_quartile_heterogeneity.png saved as PNG format
+
+. di as text "  Saved: fig1c_income_quartile_heterogeneity.png"
+  Saved: fig1c_income_quartile_heterogeneity.png
+
+. 
+. di as text _newline " [fig_1] Done. All figures saved to: $graphs"
+
+ [fig_1] Done. All figures saved to: C:\Users\carolbraga\Downloads\stata_sample/output/graphs
+
+. 
+end of do-file
+
+. do "$anly/table_2.do"
+
+. * ===========================================================================
+. * analysis/table_2.do  -  Table 3: Income-quartile heterogeneity in event study
+. * ===========================================================================
+. * INPUT  : $data/panel_maps.dta
+. *
+. * OUTPUT : $tables/table3_heterogeneity.tex  (LaTeX via esttab)
+. *
+. * DESIGN:
+. *   Estimates the hospitalization event study for each income quartile
+. *   separately, comparing high-disease-burden (Q4) against low-disease-burden
+. *   (Q1) municipalities within that quartile.  Under the price-sensitivity
+. *   mechanism, the treatment effect should be largest (most negative post-
+. *   treatment) in the lowest-income quartile and decrease monotonically as
+. *   income rises.
+. *
+. *   One column per income quartile; basic specification (municipality + year
+. *   FE, clustered SE) for comparability across groups.
+. * ---------------------------------------------------------------------------
+. 
+. di as text _newline " [table_2] Running heterogeneity by income quartile..."
+
+ [table_2] Running heterogeneity by income quartile...
+
+. 
+. use "$data/panel_maps.dta", clear
+
+. 
+. * ---------------------------------------------------------------------------
+. * 1. Sample: municipalities at disease extremes (Q1 low, Q4 high)
+. * ---------------------------------------------------------------------------
+. keep if inlist(dis_q, 1, 4) & !missing(inc_q)
+(25,329 observations deleted)
+
+. 
+. * Treatment indicator: Q4 disease = treated within each income group
+. gen byte treated_het = (dis_q == 4)
+
+. label var treated_het "= 1 if Q4 disease burden within income quartile"
+
+. 
+. * ---------------------------------------------------------------------------
+. * 2. Event time and interaction dummies
+. * ---------------------------------------------------------------------------
+. gen int event_time = year - $treat_year
+
+. replace event_time = -$pre_window if event_time < -$pre_window
+(2,783 real changes made)
+
+. replace event_time = $post_window if event_time > $post_window
+(0 real changes made)
+
+. 
+. local evars pre4 pre3 pre2 post0 post1 post2 post3
+
+. 
+. forvalues t = 2/$pre_window {
+  2.     gen byte pre`t' = (event_time == -`t') * treated_het
+  3.     label var pre`t' "Treated_het x (k = -`t')"
+  4. }
+
+. forvalues t = 0/$post_window {
+  2.     gen byte post`t' = (event_time == `t') * treated_het
+  3.     label var post`t' "Treated_het x (k = `t')"
+  4. }
+
+. 
+. xtset municipality_code year
+
+Panel variable: municipality_code (strongly balanced)
+ Time variable: year, 2008 to 2016
+         Delta: 1 unit
+
+. 
+. * ---------------------------------------------------------------------------
+. * 3. Run event study within each income quartile
+. * ---------------------------------------------------------------------------
+. forvalues q = 1/4 {
+  2.     reghdfe hosp_rate `evars' if inc_q == `q', ///
+>         absorb(municipality_code year)          ///
+>         cluster(municipality_code)              ///
+>         nocons
+  3. 
+.     estimates store het_q`q'
+  4.     di as text "  Q`q': N=" e(N) "  clusters=" e(N_clust) "  Within R2=" %6.4f e(r2_within)
+  5. }
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      6,804
+Absorbing 2 HDFE groups                           F(   7,    755) =      48.99
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.8634
+                                                  Adj R-squared   =     0.8460
+                                                  Within R-sq.    =     0.0900
+Number of clusters (municipality_code) =        756Root MSE       =   126.6811
+
+                    (Std. err. adjusted for 756 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+   hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |   -15.8291   13.87405    -1.14   0.254     -43.0654    11.40721
+        pre3 |   122.3885   11.91496    10.27   0.000     98.99806    145.7789
+        pre2 |   59.22504   9.390965     6.31   0.000     40.78954    77.66055
+       post0 |  -29.86271    10.1719    -2.94   0.003    -49.83128   -9.894133
+       post1 |  -56.85755   11.40655    -4.98   0.000    -79.24987   -34.46522
+       post2 |  -99.66339   15.46852    -6.44   0.000    -130.0298   -69.29696
+       post3 |  -152.2669   16.50712    -9.22   0.000    -184.6722   -119.8615
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       756         756           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+  Q1: N=6804  clusters=756  Within R2=0.0900
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      6,786
+Absorbing 2 HDFE groups                           F(   7,    753) =      46.10
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.8215
+                                                  Adj R-squared   =     0.7988
+                                                  Within R-sq.    =     0.0667
+Number of clusters (municipality_code) =        754Root MSE       =   135.8611
+
+                    (Std. err. adjusted for 754 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+   hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |   11.88918   15.97699     0.74   0.457    -19.47556    43.25392
+        pre3 |   152.5503   12.80129    11.92   0.000     127.4198    177.6807
+        pre2 |   45.06876   9.969386     4.52   0.000     25.49766    64.63985
+       post0 |  -20.03848   10.42262    -1.92   0.055    -40.49932    .4223572
+       post1 |  -45.64696   13.05153    -3.50   0.000    -71.26867   -20.02525
+       post2 |  -71.39202   15.87459    -4.50   0.000    -102.5557    -40.2283
+       post3 |  -96.78677   16.31661    -5.93   0.000    -128.8182   -64.75531
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       754         754           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+  Q2: N=6786  clusters=754  Within R2=0.0667
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      6,075
+Absorbing 2 HDFE groups                           F(   7,    674) =      43.35
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.8343
+                                                  Adj R-squared   =     0.8131
+                                                  Within R-sq.    =     0.0358
+Number of clusters (municipality_code) =        675Root MSE       =   130.0669
+
+                    (Std. err. adjusted for 675 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+   hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |  -30.02997   12.23514    -2.45   0.014    -54.05354   -6.006409
+        pre3 |   97.97156   10.82063     9.05   0.000     76.72535    119.2178
+        pre2 |   16.34388   8.195405     1.99   0.047     .2522849    32.43547
+       post0 |  -48.41782   8.870643    -5.46   0.000    -65.83524   -31.00041
+       post1 |  -44.41384   10.90462    -4.07   0.000    -65.82495   -23.00272
+       post2 |  -64.68143   12.58393    -5.14   0.000    -89.38984   -39.97302
+       post3 |  -61.42187   14.43057    -4.26   0.000    -89.75615   -33.08759
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       675         675           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+  Q3: N=6075  clusters=675  Within R2=0.0358
+(MWFE estimator converged in 2 iterations)
+
+HDFE Linear regression                            Number of obs   =      5,382
+Absorbing 2 HDFE groups                           F(   7,    597) =      39.92
+Statistics robust to heteroskedasticity           Prob > F        =     0.0000
+                                                  R-squared       =     0.9065
+                                                  Adj R-squared   =     0.8945
+                                                  Within R-sq.    =     0.0574
+Number of clusters (municipality_code) =        598Root MSE       =   110.8869
+
+                    (Std. err. adjusted for 598 clusters in municipality_code)
+------------------------------------------------------------------------------
+             |               Robust
+   hosp_rate | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pre4 |  -21.94144   11.52835    -1.90   0.057    -44.58249    .6996027
+        pre3 |    92.6794   10.12098     9.16   0.000     72.80235    112.5564
+        pre2 |   43.76121   7.930926     5.52   0.000      28.1853    59.33711
+       post0 |  -39.02355    8.14823    -4.79   0.000    -55.02623   -23.02087
+       post1 |  -49.65616   10.92663    -4.54   0.000    -71.11547   -28.19685
+       post2 |  -62.28834   13.21502    -4.71   0.000    -88.24192   -36.33475
+       post3 |  -84.45535    13.2728    -6.36   0.000    -110.5224    -58.3883
+------------------------------------------------------------------------------
+
+Absorbed degrees of freedom:
+-----------------------------------------------------------+
+       Absorbed FE | Categories  - Redundant  = Num. Coefs |
+-------------------+---------------------------------------|
+ municipality_code |       598         598           0    *|
+              year |         9           1           8     |
+-----------------------------------------------------------+
+* = FE nested within cluster; treated as redundant for DoF computation
+  Q4: N=5382  clusters=598  Within R2=0.0574
+
+. 
+. * ---------------------------------------------------------------------------
+. * 4. Export LaTeX table
+. * ---------------------------------------------------------------------------
+. esttab het_q1 het_q2 het_q3 het_q4                                    ///
+>     using "$tables/table3_heterogeneity.tex", replace                  ///
+>     booktabs                                                           ///
+>     keep(`evars') order(`evars')                                       ///
+>     coeflabels(                                                        ///
+>         pre4  "Treated \$\times\$ \$k = -4\$"                         ///
+>         pre3  "Treated \$\times\$ \$k = -3\$"                         ///
+>         pre2  "Treated \$\times\$ \$k = -2\$"                         ///
+>         post0 "Treated \$\times\$ \$k = 0\$"                          ///
+>         post1 "Treated \$\times\$ \$k = 1\$"                          ///
+>         post2 "Treated \$\times\$ \$k = 2\$"                          ///
+>         post3 "Treated \$\times\$ \$k = 3\$")                         ///
+>     mtitles("Q1 (Lowest)" "Q2" "Q3" "Q4 (Highest)")                   ///
+>     mgroups("Hospitalization Rate (per 10,000): High vs. Low Disease Burden by Income Quartile", ///
+>             pattern(1 0 0 0)                                           ///
+>             prefix(\multicolumn{@span}{c}{) suffix(}) span)            ///
+>     stats(N r2_within N_clust,                                         ///
+>           fmt(0 3 0)                                                   ///
+>           labels("Observations" "Within R\$^2\$" "Municipalities"))    ///
+>     star(* 0.1 ** 0.05 *** 0.01)                                       ///
+>     se                                                                 ///
+>     note("Municipality and year fixed effects. SE clustered at municipality level." ///
+>          "Each column compares Q4-disease vs Q1-disease municipalities within the income quartile." ///
+>          "Reference period: \$k = -1\$ (year 2012). Treatment indicator = 1 for Q4-disease municipalities.") ///
+>     label
+(file C:\Users\carolbraga\Downloads\stata_sample/output/tables/table3_heterogeneity.tex not found)
+(output written to C:\Users\carolbraga\Downloads\stata_sample/output/tables/table3_heterogeneity.tex)
+
+. 
+. di as text "  Saved: table3_heterogeneity.tex"
+  Saved: table3_heterogeneity.tex
+
+. 
+. * ---------------------------------------------------------------------------
+. * 5. Console preview
+. * ---------------------------------------------------------------------------
+. di as text _newline "  --- Console Preview ---"
+
+  --- Console Preview ---
+
+. esttab het_q1 het_q2 het_q3 het_q4,                                   ///
+>     keep(`evars') order(`evars')                                       ///
+>     star(* 0.1 ** 0.05 *** 0.01) se                                   ///
+>     stats(N r2_within, fmt(0 3) labels("N" "Within R2"))              ///
+>     mtitles("Q1 Income" "Q2 Income" "Q3 Income" "Q4 Income")
+
+----------------------------------------------------------------------------
+                      (1)             (2)             (3)             (4)   
+                Q1 Income       Q2 Income       Q3 Income       Q4 Income   
+----------------------------------------------------------------------------
+pre4               -15.83           11.89          -30.03**        -21.94*  
+                  (13.87)         (15.98)         (12.24)         (11.53)   
+
+pre3                122.4***        152.6***        97.97***        92.68***
+                  (11.91)         (12.80)         (10.82)         (10.12)   
+
+pre2                59.23***        45.07***        16.34**         43.76***
+                  (9.391)         (9.969)         (8.195)         (7.931)   
+
+post0              -29.86***       -20.04*         -48.42***       -39.02***
+                  (10.17)         (10.42)         (8.871)         (8.148)   
+
+post1              -56.86***       -45.65***       -44.41***       -49.66***
+                  (11.41)         (13.05)         (10.90)         (10.93)   
+
+post2              -99.66***       -71.39***       -64.68***       -62.29***
+                  (15.47)         (15.87)         (12.58)         (13.22)   
+
+post3              -152.3***       -96.79***       -61.42***       -84.46***
+                  (16.51)         (16.32)         (14.43)         (13.27)   
+----------------------------------------------------------------------------
+N                    6804            6786            6075            5382   
+Within R2           0.090           0.067           0.036           0.057   
+----------------------------------------------------------------------------
+Standard errors in parentheses
+* p<0.1, ** p<0.05, *** p<0.01
+
+. 
+. di as text _newline " [table_2] Done."
+
+ [table_2] Done.
+
+. 
+end of do-file
+
+. 
+. di as result _newline ///
+>    "======================================================================" _newline ///
+>    " All outputs saved to: $output" _newline ///
+>    " Finished : `c(current_time)'" _newline ///
+>    "======================================================================"
+
+======================================================================
+ All outputs saved to: C:\Users\carolbraga\Downloads\stata_sample/output
+ Finished : 09:54:52
+======================================================================
+
+. 
+. log close master
+      name:  master
+       log:  C:\Users\carolbraga\Downloads\stata_sample/output/logs/master_20 Jul 2026.txt
+  log type:  text
+ closed on:  20 Jul 2026, 09:54:52
+----------------------------------------------------------------------------------------------------------------------------------------
