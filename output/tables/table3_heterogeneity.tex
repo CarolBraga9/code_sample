@@ -1,0 +1,37 @@
+{
+\def\sym#1{\ifmmode^{#1}\else\(^{#1}\)\fi}
+\begin{tabular}{l*{4}{c}}
+\toprule
+                    &\multicolumn{4}{c}{Hospitalization Rate (per 10,000): High vs. Low Disease Burden by Income Quartile}\\
+                    &\multicolumn{1}{c}{(1)}&\multicolumn{1}{c}{(2)}&\multicolumn{1}{c}{(3)}&\multicolumn{1}{c}{(4)}\\
+                    &\multicolumn{1}{c}{Q1 (Lowest)}&\multicolumn{1}{c}{Q2}&\multicolumn{1}{c}{Q3}&\multicolumn{1}{c}{Q4 (Highest)}\\
+\midrule
+Treated $\times$ $k = -4$&      -15.83         &       11.89         &      -30.03\sym{**} &      -21.94\sym{*}  \\
+                    &     (13.87)         &     (15.98)         &     (12.24)         &     (11.53)         \\
+\addlinespace
+Treated $\times$ $k = -3$&       122.4\sym{***}&       152.6\sym{***}&       97.97\sym{***}&       92.68\sym{***}\\
+                    &     (11.91)         &     (12.80)         &     (10.82)         &     (10.12)         \\
+\addlinespace
+Treated $\times$ $k = -2$&       59.23\sym{***}&       45.07\sym{***}&       16.34\sym{**} &       43.76\sym{***}\\
+                    &     (9.391)         &     (9.969)         &     (8.195)         &     (7.931)         \\
+\addlinespace
+Treated $\times$ $k = 0$&      -29.86\sym{***}&      -20.04\sym{*}  &      -48.42\sym{***}&      -39.02\sym{***}\\
+                    &     (10.17)         &     (10.42)         &     (8.871)         &     (8.148)         \\
+\addlinespace
+Treated $\times$ $k = 1$&      -56.86\sym{***}&      -45.65\sym{***}&      -44.41\sym{***}&      -49.66\sym{***}\\
+                    &     (11.41)         &     (13.05)         &     (10.90)         &     (10.93)         \\
+\addlinespace
+Treated $\times$ $k = 2$&      -99.66\sym{***}&      -71.39\sym{***}&      -64.68\sym{***}&      -62.29\sym{***}\\
+                    &     (15.47)         &     (15.87)         &     (12.58)         &     (13.22)         \\
+\addlinespace
+Treated $\times$ $k = 3$&      -152.3\sym{***}&      -96.79\sym{***}&      -61.42\sym{***}&      -84.46\sym{***}\\
+                    &     (16.51)         &     (16.32)         &     (14.43)         &     (13.27)         \\
+\midrule
+Observations        &        6804         &        6786         &        6075         &        5382         \\
+Within R$^2$        &       0.090         &       0.067         &       0.036         &       0.057         \\
+Municipalities      &         756         &         754         &         675         &         598         \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize Municipality and year fixed effects. SE clustered at municipality level. Each column compares Q4-disease vs Q1-disease municipalities within the income quartile. Reference period: $k = -1$ (year 2012). Treatment indicator = 1 for Q4-disease municipalities.}\\
+\multicolumn{5}{l}{\footnotesize \sym{*} \(p<0.1\), \sym{**} \(p<0.05\), \sym{***} \(p<0.01\)}\\
+\end{tabular}
+}

@@ -1,0 +1,38 @@
+{
+\def\sym#1{\ifmmode^{#1}\else\(^{#1}\)\fi}
+\begin{tabular}{l*{4}{c}}
+\toprule
+                    &\multicolumn{2}{c}{Hospitalization Rate (per 10,000)}&\multicolumn{2}{c}{Mortality Rate (per 10,000)}\\\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+                    &\multicolumn{1}{c}{(1)}&\multicolumn{1}{c}{(2)}&\multicolumn{1}{c}{(3)}&\multicolumn{1}{c}{(4)}\\
+                    &\multicolumn{1}{c}{Hosp. Basic}&\multicolumn{1}{c}{Hosp. Controlled}&\multicolumn{1}{c}{Mort. Basic}&\multicolumn{1}{c}{Mort. Controlled}\\
+\midrule
+Treated $\times$ $k = -4$&      -15.83         &       86.29\sym{**} &      -1.458         &       1.588         \\
+                    &     (13.87)         &     (34.52)         &     (0.905)         &     (2.028)         \\
+\addlinespace
+Treated $\times$ $k = -3$&       122.4\sym{***}&       62.32         &      -0.557         &       0.158         \\
+                    &     (11.91)         &     (38.56)         &     (0.940)         &     (1.864)         \\
+\addlinespace
+Treated $\times$ $k = -2$&       59.23\sym{***}&       13.06         &      -0.761         &     -0.0577         \\
+                    &     (9.391)         &     (28.07)         &     (0.911)         &     (1.871)         \\
+\addlinespace
+Treated $\times$ $k = 0$&      -29.86\sym{***}&       15.48         &      -0.857         &      -0.111         \\
+                    &     (10.17)         &     (26.86)         &     (0.962)         &     (1.979)         \\
+\addlinespace
+Treated $\times$ $k = 1$&      -56.86\sym{***}&       31.89         &      -2.102\sym{**} &       1.707         \\
+                    &     (11.41)         &     (27.74)         &     (1.027)         &     (2.181)         \\
+\addlinespace
+Treated $\times$ $k = 2$&      -99.66\sym{***}&       80.82         &      -2.272\sym{**} &      -1.321         \\
+                    &     (15.47)         &     (56.90)         &     (1.017)         &     (2.044)         \\
+\addlinespace
+Treated $\times$ $k = 3$&      -152.3\sym{***}&       51.41         &      -1.188         &      -0.449         \\
+                    &     (16.51)         &     (60.58)         &     (1.032)         &     (2.232)         \\
+\midrule
+Observations        &        6804         &        6804         &        6804         &        6804         \\
+R$^2$               &       0.863         &       0.870         &       0.702         &       0.705         \\
+Within R$^2$        &       0.090         &       0.136         &       0.001         &       0.012         \\
+Municipalities      &         756         &         756         &         756         &         756         \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize Municipality and year fixed effects in all models. Standard errors clustered at the municipality level in parentheses. Reference period: $k = -1$ (year 2012). 313 treated (Target LI-HD) and 441 control (Reference LI-LD) municipalities. Controlled models add standardized 2010 baseline wage, hospitalization rate, literacy rate, and race share each interacted with year dummies.}\\
+\multicolumn{5}{l}{\footnotesize \sym{*} \(p<0.1\), \sym{**} \(p<0.05\), \sym{***} \(p<0.01\)}\\
+\end{tabular}
+}
