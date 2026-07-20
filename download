@@ -1,0 +1,18 @@
+# Generated data — reproducible by running prepare_data.R and master.do
+data/
+output/
+
+# Stata temporary files
+*.stswp
+*.log
+
+# R temporary files
+.Rhistory
+.RData
+.Rproj.user/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
